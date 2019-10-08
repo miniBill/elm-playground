@@ -2,7 +2,7 @@ module Playground exposing
     ( picture, animation, game
     , Shape, circle, oval, square, rectangle, triangle, pentagon, hexagon, octagon, polygon
     , words
-    , image
+    , image, Atlas, sprite
     , move, moveUp, moveDown, moveLeft, moveRight, moveX, moveY
     , scale, rotate, fade, flipHorizontally, flipVertically
     , group
@@ -44,7 +44,7 @@ module Playground exposing
 
 # Images
 
-@docs image
+@docs image, Atlas, atlas, sprite
 
 
 # Move Shapes
@@ -111,12 +111,14 @@ module Playground exposing
 import Browser
 import Browser.Dom as Dom
 import Browser.Events as E
+import Dict
 import Html
 import Html.Attributes as H
 import Json.Decode as D
 import Set
 import Svg exposing (..)
 import Svg.Attributes exposing (..)
+import Svg.Lazy exposing (lazy)
 import Task
 import Time
 
@@ -145,7 +147,7 @@ picture shapes =
 
         view screen =
             { title = "Playground"
-            , body = [ render screen shapes ]
+            , body = [ render [] screen shapes ]
             }
 
         update ( width, height ) _ =
@@ -573,7 +575,7 @@ animation viewFrame =
 
         view (Animation _ screen time) =
             { title = "Playground"
-            , body = [ render screen (viewFrame time) ]
+            , body = [ render [] screen (viewFrame time) ]
             }
 
         update msg model =
@@ -707,7 +709,7 @@ game viewMemory updateMemory initialMemory =
 
         view (Game _ memory computer) =
             { title = "Playground"
-            , body = [ render computer.screen (viewMemory computer memory) ]
+            , body = [ render [] computer.screen (viewMemory computer memory) ]
             }
 
         update msg model =
@@ -958,27 +960,32 @@ This is actually unnecessary. You can structure your `application` like this ins
             UserMsg (GotFlags flags) ->
                 initWithFlagsAndCmd flags
 
+The last difference is that your `render` function should also return the page title.
+
 -}
 application :
-    (Computer -> memory -> List Shape)
-    -> (UserMsg msg -> Computer -> memory -> ( memory, Cmd msg ))
-    -> (memory -> Sub msg)
-    -> memory
+    { view : Computer -> memory -> ( String, List Shape )
+    , update : UserMsg msg -> Computer -> memory -> ( memory, Cmd msg )
+    , subscriptions : memory -> Sub msg
+    , init : memory
+    , atlases : List Atlas
+    }
     -> Program () (Game memory) (ExternalMsg msg)
-application viewMemory updateMemory subMemory initialMemory =
+application userProgram =
     let
         init () =
-            ( Game E.Visible initialMemory initialComputer
+            ( Game E.Visible userProgram.init initialComputer
             , Cmd.map Internal <| Task.perform GotViewport Dom.getViewport
             )
 
         view (Game _ memory computer) =
-            { title = "Playground"
-            , body = [ render computer.screen (viewMemory computer memory) ]
+            let
+                ( title, shapes ) =
+                    userProgram.view computer memory
+            in
+            { title = title
+            , body = [ render userProgram.atlases computer.screen shapes ]
             }
-
-        update msg model =
-            applicationUpdate updateMemory msg model
 
         subscriptions (Game visibility memory _) =
             Sub.batch
@@ -989,13 +996,13 @@ application viewMemory updateMemory subMemory initialMemory =
 
                         E.Visible ->
                             gameSubscriptions
-                , Sub.map External <| subMemory memory
+                , Sub.map External <| userProgram.subscriptions memory
                 ]
     in
     Browser.document
         { init = init
         , view = view
-        , update = update
+        , update = applicationUpdate userProgram.update
         , subscriptions = subscriptions
         }
 
@@ -1112,6 +1119,17 @@ type Form
     | Ngon Color Int Number
     | Polygon Color (List ( Number, Number ))
     | Image Number Number String
+    | Sprite
+        Number
+        -- w
+        Number
+        -- h
+        String
+        -- atlasName
+        Int
+        -- atlasX
+        Int
+      -- atlasY
     | Words Color String
     | Group (List Shape)
 
@@ -1294,6 +1312,50 @@ You provide the width, height, and then the URL of the image you want to show.
 image : Number -> Number -> String -> Shape
 image w h src =
     Shape 0 0 0 1 1 False (Image w h src)
+
+
+{-| This is a type for sprite sheets/texture atlases.
+
+What's a sprite sheet? It's a big image containing all the animation frames for an object.
+
+What's a texture atlas? It's a big image containing all the textures for different objects.
+
+Technically they are one and the same, so they're represented with the same type.
+
+You can use atlases with [`application`](#application),
+adding them once (and so using less resources) and then referencing
+them with [`sprite`](#sprite).
+
+-}
+type alias Atlas =
+    { name : String
+    , tileWidth : Int
+    , tileHeight : Int
+    , tileBorder : Int
+    , width : Int
+    , height : Int
+    , href : String
+    }
+
+
+{-| Show a piece of an [`Atlas`](#Atlas).
+
+The first parameter is the name you gave to the atlas when
+adding it to your [`application`](#application), the second
+and third parameters are the horizontal and vertical position
+of the sprite (in terms of tiles: 0 is the top/left,
+1 is the one immediately to the right/bottom, and so on...).
+
+For example, if your animation is on the third row (which becomes 2,
+because we count from zero), it has 7 frames, and you want to loop it
+every 5 seconds you can write:
+
+    sprite width height "atlasName" (spin (1.0 / 5.0) * 9 // 360) 2
+
+-}
+sprite : Number -> Number -> String -> Int -> Int -> Shape
+sprite w h atlas ax ay =
+    Shape 0 0 0 1 1 False (Sprite w h atlas ax ay)
 
 
 {-| Show some words!
@@ -1835,8 +1897,8 @@ colorClamp number =
 -- RENDER
 
 
-render : Screen -> List Shape -> Html.Html msg
-render screen shapes =
+render : List Atlas -> Screen -> List Shape -> Html.Html msg
+render atlases screen shapes =
     let
         w =
             String.fromFloat screen.width
@@ -1849,6 +1911,24 @@ render screen shapes =
 
         y =
             String.fromFloat screen.bottom
+
+        atlasesDict =
+            atlases
+                |> List.map (\atlas -> ( atlas.name, { atlas = atlas, used = [] } ))
+                |> Dict.fromList
+
+        atlasesWithUsed : List { atlas : Atlas, used : List ( Int, Int ) }
+        atlasesWithUsed =
+            shapes
+                |> List.concatMap extractSymbols
+                |> List.foldl
+                    (\{ atlasName, symbol } ->
+                        Dict.update atlasName
+                            (Maybe.map <| \atlas -> { atlas | used = symbol :: atlas.used })
+                    )
+                    atlasesDict
+                |> Dict.values
+                |> List.map (\atlas -> { atlas | used = atlas.used |> Set.fromList |> Set.toList })
     in
     svg
         [ viewBox (x ++ " " ++ y ++ " " ++ w ++ " " ++ h)
@@ -1858,7 +1938,95 @@ render screen shapes =
         , width "100%"
         , height "100%"
         ]
-        (List.map renderShape shapes)
+        (renderAtlases atlasesWithUsed
+            :: List.map renderShape shapes
+        )
+
+
+extractSymbols : Shape -> List { atlasName : String, symbol : ( Int, Int ) }
+extractSymbols (Shape _ _ _ _ _ _ form) =
+    case form of
+        Sprite _ _ atlasName x y ->
+            [ { atlasName = atlasName
+              , symbol = ( x, y )
+              }
+            ]
+
+        Group ss ->
+            List.concatMap extractSymbols ss
+
+        Rectangle _ _ _ ->
+            []
+
+        Circle _ _ ->
+            []
+
+        Ngon _ _ _ ->
+            []
+
+        Oval _ _ _ ->
+            []
+
+        Image _ _ _ ->
+            []
+
+        Words _ _ ->
+            []
+
+        Polygon _ _ ->
+            []
+
+
+renderAtlases : List { atlas : Atlas, used : List ( Int, Int ) } -> Svg msg
+renderAtlases ats =
+    let
+        symbols atlas used =
+            let
+                viewSymbol ( ax, ay ) =
+                    let
+                        sid =
+                            atlas.name ++ "-" ++ String.fromInt ax ++ "-" ++ String.fromInt ay
+
+                        vb =
+                            String.join " " <|
+                                List.map String.fromInt
+                                    [ atlas.tileBorder + ax * (atlas.tileBorder + atlas.tileWidth)
+                                    , atlas.tileBorder + ay * (atlas.tileBorder + atlas.tileHeight)
+                                    , atlas.tileWidth
+                                    , atlas.tileHeight
+                                    ]
+                    in
+                    symbol
+                        [ id sid
+                        , viewBox vb
+                        , width <| String.fromInt atlas.tileWidth
+                        , height <| String.fromInt atlas.tileHeight
+                        ]
+                        [ use [ H.attribute "href" <| "#" ++ atlas.name ] []
+                        ]
+            in
+            List.map viewSymbol used
+    in
+    defs []
+        (List.concatMap
+            (\{ atlas, used } ->
+                symbol
+                    [ id atlas.name
+                    , width <| String.fromInt atlas.width
+                    , height <| String.fromInt atlas.height
+                    , viewBox <| "0 0 " ++ String.fromInt atlas.width ++ " " ++ String.fromInt atlas.height
+                    ]
+                    [ Svg.image
+                        [ H.attribute "href" atlas.href
+                        , width <| String.fromInt atlas.width
+                        , height <| String.fromInt atlas.height
+                        ]
+                        []
+                    ]
+                    :: symbols atlas used
+            )
+            ats
+        )
 
 
 
@@ -1887,12 +2055,40 @@ renderShape (Shape x y angle s alpha flipped form) =
         Image width height src ->
             renderImage width height src x y angle s flipped alpha
 
+        Sprite width height atlas ax ay ->
+            renderSprite width height atlas ax ay x y angle s flipped alpha
+
         Words color string ->
             renderWords color string x y angle s flipped alpha
 
         Group shapes ->
-            g (transform (renderTransform x y angle s flipped) :: renderAlpha alpha)
-                (List.map renderShape shapes)
+            let
+                transformString =
+                    renderTransform x y angle s flipped
+            in
+            if String.isEmpty transformString then
+                g (renderAlpha alpha)
+                    (List.map renderShape shapes)
+
+            else
+                g (transform transformString :: renderAlpha alpha)
+                    (List.map renderShape shapes)
+
+
+shapeCommonAttrs : Color -> Number -> Number -> Number -> Number -> Bool -> Number -> List (Attribute msg)
+shapeCommonAttrs color x y angle s flipped alpha =
+    let
+        transformString =
+            renderTransform x y angle s flipped
+    in
+    if String.isEmpty transformString then
+        fill (renderColor color)
+            :: renderAlpha alpha
+
+    else
+        fill (renderColor color)
+            :: transform transformString
+            :: renderAlpha alpha
 
 
 
@@ -1903,9 +2099,7 @@ renderCircle : Color -> Number -> Number -> Number -> Number -> Number -> Bool -
 renderCircle color radius x y angle s flipped alpha =
     Svg.circle
         (r (String.fromFloat radius)
-            :: fill (renderColor color)
-            :: transform (renderTransform x y angle s flipped)
-            :: renderAlpha alpha
+            :: shapeCommonAttrs color x y angle s flipped alpha
         )
         []
 
@@ -1915,9 +2109,7 @@ renderOval color width height x y angle s flipped alpha =
     ellipse
         (rx (String.fromFloat (width / 2))
             :: ry (String.fromFloat (height / 2))
-            :: fill (renderColor color)
-            :: transform (renderTransform x y angle s flipped)
-            :: renderAlpha alpha
+            :: shapeCommonAttrs color x y angle s flipped alpha
         )
         []
 
@@ -1952,6 +2144,18 @@ renderImage : Number -> Number -> String -> Number -> Number -> Number -> Number
 renderImage w h src x y angle s flipped alpha =
     Svg.image
         (xlinkHref src
+            :: width (String.fromFloat w)
+            :: height (String.fromFloat h)
+            :: transform (renderRectTransform w h x y angle s flipped)
+            :: renderAlpha alpha
+        )
+        []
+
+
+renderSprite : Number -> Number -> String -> Int -> Int -> Number -> Number -> Number -> Number -> Bool -> Number -> Svg msg
+renderSprite w h atlas ax ay x y angle s flipped alpha =
+    Svg.use
+        (H.attribute "href" ("#" ++ atlas ++ "-" ++ String.fromInt ax ++ "-" ++ String.fromInt ay)
             :: width (String.fromFloat w)
             :: height (String.fromFloat h)
             :: transform (renderRectTransform w h x y angle s flipped)
@@ -2066,7 +2270,11 @@ renderTransform : Number -> Number -> Number -> Number -> Bool -> String
 renderTransform x y a s l =
     let
         translation =
-            "translate(" ++ String.fromFloat x ++ "," ++ String.fromFloat -y ++ ") "
+            if x == 0 && y == 0 then
+                ""
+
+            else
+                "translate(" ++ String.fromFloat x ++ "," ++ String.fromFloat -y ++ ") "
 
         rotation =
             if a == 0 then
@@ -2085,4 +2293,4 @@ renderTransform x y a s l =
             else
                 "scale(" ++ String.fromFloat s ++ ")"
     in
-    String.join " " [ translation, rotation, scaling ]
+    String.join " " <| List.filter (not << String.isEmpty) [ translation, rotation, scaling ]
