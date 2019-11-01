@@ -569,11 +569,11 @@ animation : (Time -> List Shape) -> Program () Animation Msg
 animation viewFrame =
     let
         init () =
-            ( Animation E.Visible (toScreen 600 600) (Time (Time.millisToPosix 0))
+            ( Animation (toScreen 600 600) (Time (Time.millisToPosix 0))
             , Task.perform GotViewport Dom.getViewport
             )
 
-        view (Animation _ screen time) =
+        view (Animation screen time) =
             { title = "Playground"
             , body = [ render [] screen (viewFrame time) ]
             }
@@ -583,13 +583,8 @@ animation viewFrame =
             , Cmd.none
             )
 
-        subscriptions (Animation visibility _ _) =
-            case visibility of
-                E.Hidden ->
-                    E.onVisibilityChange VisibilityChanged
-
-                E.Visible ->
-                    animationSubscriptions
+        subscriptions (Animation _ _) =
+            animationSubscriptions
     in
     Browser.document
         { init = init
@@ -600,7 +595,7 @@ animation viewFrame =
 
 
 type Animation
-    = Animation E.Visibility Screen Time
+    = Animation Screen Time
 
 
 animationSubscriptions : Sub Msg
@@ -608,24 +603,20 @@ animationSubscriptions =
     Sub.batch
         [ E.onResize Resized
         , E.onAnimationFrame Tick
-        , E.onVisibilityChange VisibilityChanged
         ]
 
 
 animationUpdate : Msg -> Animation -> Animation
-animationUpdate msg ((Animation v s t) as state) =
+animationUpdate msg ((Animation s t) as state) =
     case msg of
         Tick posix ->
-            Animation v s (Time posix)
-
-        VisibilityChanged vis ->
-            Animation vis s t
+            Animation s (Time posix)
 
         GotViewport { viewport } ->
-            Animation v (toScreen viewport.width viewport.height) t
+            Animation (toScreen viewport.width viewport.height) t
 
         Resized w h ->
-            Animation v (toScreen (toFloat w) (toFloat h)) t
+            Animation (toScreen (toFloat w) (toFloat h)) t
 
         KeyChanged _ _ ->
             state
@@ -703,11 +694,11 @@ game : (Computer -> memory -> List Shape) -> (Computer -> memory -> memory) -> m
 game viewMemory updateMemory initialMemory =
     let
         init () =
-            ( Game E.Visible initialMemory initialComputer
+            ( Game   initialMemory initialComputer
             , Task.perform GotViewport Dom.getViewport
             )
 
-        view (Game _ memory computer) =
+        view (Game memory computer) =
             { title = "Playground"
             , body = [ render [] computer.screen (viewMemory computer memory) ]
             }
@@ -717,13 +708,8 @@ game viewMemory updateMemory initialMemory =
             , Cmd.none
             )
 
-        subscriptions (Game visibility _ _) =
-            case visibility of
-                E.Hidden ->
-                    E.onVisibilityChange VisibilityChanged
-
-                E.Visible ->
-                    gameSubscriptions
+        subscriptions (Game _ _) =
+            gameSubscriptions
     in
     Browser.document
         { init = init
@@ -753,7 +739,6 @@ gameSubscriptions =
         , E.onKeyUp (D.map (KeyChanged False) (D.field "key" D.string))
         , E.onKeyDown (D.map (KeyChanged True) (D.field "key" D.string))
         , E.onAnimationFrame Tick
-        , E.onVisibilityChange VisibilityChanged
         , E.onClick (D.succeed MouseClick)
         , E.onMouseDown (D.succeed (MouseButton True))
         , E.onMouseUp (D.succeed (MouseButton False))
@@ -766,7 +751,7 @@ gameSubscriptions =
 
 
 type Game memory
-    = Game E.Visibility memory Computer
+    = Game memory Computer
 
 
 type Msg
@@ -774,17 +759,16 @@ type Msg
     | Tick Time.Posix
     | GotViewport Dom.Viewport
     | Resized Int Int
-    | VisibilityChanged E.Visibility
     | MouseMove Float Float
     | MouseClick
     | MouseButton Bool
 
 
 gameUpdate : (Computer -> memory -> memory) -> Msg -> Game memory -> Game memory
-gameUpdate updateMemory msg (Game vis memory computer) =
+gameUpdate updateMemory msg (Game memory computer) =
     case msg of
         Tick time ->
-            Game vis (updateMemory computer memory) <|
+            Game (updateMemory computer memory) <|
                 if computer.mouse.click then
                     { computer | time = Time time, mouse = mouseClick False computer.mouse }
 
@@ -792,13 +776,13 @@ gameUpdate updateMemory msg (Game vis memory computer) =
                     { computer | time = Time time }
 
         GotViewport { viewport } ->
-            Game vis memory { computer | screen = toScreen viewport.width viewport.height }
+            Game memory { computer | screen = toScreen viewport.width viewport.height }
 
         Resized w h ->
-            Game vis memory { computer | screen = toScreen (toFloat w) (toFloat h) }
+            Game memory { computer | screen = toScreen (toFloat w) (toFloat h) }
 
         KeyChanged isDown key ->
-            Game vis memory { computer | keyboard = updateKeyboard isDown key computer.keyboard }
+            Game memory { computer | keyboard = updateKeyboard isDown key computer.keyboard }
 
         MouseMove pageX pageY ->
             let
@@ -808,21 +792,13 @@ gameUpdate updateMemory msg (Game vis memory computer) =
                 y =
                     computer.screen.top - pageY
             in
-            Game vis memory { computer | mouse = mouseMove x y computer.mouse }
+            Game memory { computer | mouse = mouseMove x y computer.mouse }
 
         MouseClick ->
-            Game vis memory { computer | mouse = mouseClick True computer.mouse }
+            Game memory { computer | mouse = mouseClick True computer.mouse }
 
         MouseButton isDown ->
-            Game vis memory { computer | mouse = mouseDown isDown computer.mouse }
-
-        VisibilityChanged visibility ->
-            Game visibility
-                memory
-                { computer
-                    | keyboard = emptyKeyboard
-                    , mouse = Mouse computer.mouse.x computer.mouse.y False False
-                }
+            Game memory { computer | mouse = mouseDown isDown computer.mouse }
 
 
 
@@ -974,11 +950,11 @@ application :
 application userProgram =
     let
         init () =
-            ( Game E.Visible userProgram.init initialComputer
+            ( Game userProgram.init initialComputer
             , Cmd.map Internal <| Task.perform GotViewport Dom.getViewport
             )
 
-        view (Game _ memory computer) =
+        view (Game memory computer) =
             let
                 ( title, shapes ) =
                     userProgram.view computer memory
@@ -987,15 +963,9 @@ application userProgram =
             , body = [ render userProgram.atlases computer.screen shapes ]
             }
 
-        subscriptions (Game visibility memory _) =
+        subscriptions (Game memory _) =
             Sub.batch
-                [ Sub.map Internal <|
-                    case visibility of
-                        E.Hidden ->
-                            E.onVisibilityChange VisibilityChanged
-
-                        E.Visible ->
-                            gameSubscriptions
+                [ Sub.map Internal gameSubscriptions
                 , Sub.map External <| userProgram.subscriptions memory
                 ]
     in
@@ -1025,14 +995,14 @@ type ExternalMsg msg
 
 
 applicationUpdate : (UserMsg msg -> Computer -> memory -> ( memory, Cmd msg )) -> ExternalMsg msg -> Game memory -> ( Game memory, Cmd (ExternalMsg msg) )
-applicationUpdate updateMemory msg (Game vis memory computer) =
+applicationUpdate updateMemory msg (Game memory computer) =
     case msg of
         External emsg ->
             let
                 ( newMemory, cmd ) =
                     updateMemory (UserMsg emsg) computer memory
             in
-            ( Game vis newMemory computer, Cmd.map External cmd )
+            ( Game newMemory computer, Cmd.map External cmd )
 
         Internal (Tick time) ->
             let
@@ -1040,7 +1010,7 @@ applicationUpdate updateMemory msg (Game vis memory computer) =
                     updateMemory Frame computer memory
 
                 newGame =
-                    Game vis newMemory <|
+                    Game newMemory <|
                         if computer.mouse.click then
                             { computer | time = Time time, mouse = mouseClick False computer.mouse }
 
@@ -1050,13 +1020,13 @@ applicationUpdate updateMemory msg (Game vis memory computer) =
             ( newGame, Cmd.map External cmd )
 
         Internal (GotViewport { viewport }) ->
-            ( Game vis memory { computer | screen = toScreen viewport.width viewport.height }, Cmd.none )
+            ( Game memory { computer | screen = toScreen viewport.width viewport.height }, Cmd.none )
 
         Internal (Resized w h) ->
-            ( Game vis memory { computer | screen = toScreen (toFloat w) (toFloat h) }, Cmd.none )
+            ( Game memory { computer | screen = toScreen (toFloat w) (toFloat h) }, Cmd.none )
 
         Internal (KeyChanged isDown key) ->
-            ( Game vis memory { computer | keyboard = updateKeyboard isDown key computer.keyboard }, Cmd.none )
+            ( Game memory { computer | keyboard = updateKeyboard isDown key computer.keyboard }, Cmd.none )
 
         Internal (MouseMove pageX pageY) ->
             let
@@ -1066,23 +1036,13 @@ applicationUpdate updateMemory msg (Game vis memory computer) =
                 y =
                     computer.screen.top - pageY
             in
-            ( Game vis memory { computer | mouse = mouseMove x y computer.mouse }, Cmd.none )
+            ( Game memory { computer | mouse = mouseMove x y computer.mouse }, Cmd.none )
 
         Internal MouseClick ->
-            ( Game vis memory { computer | mouse = mouseClick True computer.mouse }, Cmd.none )
+            ( Game memory { computer | mouse = mouseClick True computer.mouse }, Cmd.none )
 
         Internal (MouseButton isDown) ->
-            ( Game vis memory { computer | mouse = mouseDown isDown computer.mouse }, Cmd.none )
-
-        Internal (VisibilityChanged visibility) ->
-            ( Game visibility
-                memory
-                { computer
-                    | keyboard = emptyKeyboard
-                    , mouse = Mouse computer.mouse.x computer.mouse.y False False
-                }
-            , Cmd.none
-            )
+            ( Game memory { computer | mouse = mouseDown isDown computer.mouse }, Cmd.none )
 
 
 
